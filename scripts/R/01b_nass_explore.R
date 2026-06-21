@@ -36,11 +36,16 @@ out_dir <- here("scripts", "R", "_outputs")
 dir.create(raw_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
+# >>> NASS API KEY REQUIRED HERE <<<  (free key: https://quickstats.nass.usda.gov/api)
+# Put  NASS_API_KEY=your_key  in a .Renviron file at the repo root (copy
+# .Renviron.example to .Renviron), then restart R. See 01_get_nass.R for details.
 api_key <- trimws(Sys.getenv("NASS_API_KEY"))
 if (!nzchar(api_key) && file.exists(here(".Renviron"))) {
   readRenviron(here(".Renviron")); api_key <- trimws(Sys.getenv("NASS_API_KEY"))
 }
-stopifnot("NASS_API_KEY empty — check .Renviron / restart R." = nzchar(api_key))
+stopifnot(
+  "NASS_API_KEY not found. Get a free key at https://quickstats.nass.usda.gov/api and put 'NASS_API_KEY=your_key' in a .Renviron file at the repo root, then restart R." =
+    nzchar(api_key))
 nassqs_auth(key = api_key)
 message("NASS key loaded (", nchar(api_key), " chars).")
 

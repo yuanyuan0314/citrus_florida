@@ -1,0 +1,12 @@
+# Secrets — never commit your API key
+.Renviron
+
+# Local data caches (large; re-downloaded/rebuilt by the scripts)
+data/raw/
+data/tmp/
+
+# R session leftovers
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj

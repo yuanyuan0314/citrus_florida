@@ -15,8 +15,13 @@
 #   * R packages — the first step (00_setup.R) installs anything missing.
 #   * Quarto (https://quarto.org), either on your PATH or as the R
 #     package `quarto`.
-#   * A free USDA NASS QuickStats API key in a .Renviron file at the
-#     repo root:  NASS_API_KEY=your_key   (needed for steps 1-2 only).
+#   * A free USDA NASS QuickStats API key — ONLY if you rebuild the data
+#     (steps 01 and 01b below). Not needed just to render the shipped page.
+#       1. Get a key (instant, by email):  https://quickstats.nass.usda.gov/api
+#       2. Copy the file  .Renviron.example  to  .Renviron  (same folder, the
+#          repo root) and paste your key after the = sign:
+#              NASS_API_KEY=YOUR-KEY-HERE
+#       3. Restart R, then run this file.
 #
 # ONE-RUN DEFAULT: the repo ships the computed scripts/R/_outputs/*.rds, so a
 # fresh clone renders the webpage straight away — no API key, no downloads.
@@ -45,8 +50,8 @@ RENDER_DASHBOARD  <- flag("RENDER_DASHBOARD",  TRUE)            # render dashboa
 # ---- the pipeline, in order ----------------------------------
 setup   <- "scripts/R/00_setup.R"
 scripts <- c(
-  "scripts/R/01_get_nass.R",          # NASS state series + county ranking
-  "scripts/R/01b_nass_explore.R",     # NASS FL state/county/operations  (REQUIRED, despite the name)
+  "scripts/R/01_get_nass.R",          # NASS state series + county ranking   <-- NEEDS NASS API KEY
+  "scripts/R/01b_nass_explore.R",     # NASS FL state/county/operations      <-- NEEDS NASS API KEY  (REQUIRED, despite the name)
   "scripts/R/02_get_uspvdb.R",        # USPVDB utility-scale solar facilities
   "scripts/R/03_get_dor_nal.R",       # FL DOR NAL parcel attributes (top-2 counties)
   "scripts/R/04_county_choropleth.R", # county map layers + 2002->2022 bearing-acreage change
@@ -66,6 +71,25 @@ run_one <- function(path) {
 }
 
 if (RUN_SETUP)         run_one(setup)
+
+# ---- preflight: the data pipeline needs a NASS API key (steps 01, 01b) -------
+if (RUN_DATA_PIPELINE) {
+  if (file.exists(here(".Renviron"))) readRenviron(here(".Renviron"))
+  if (!nzchar(trimws(Sys.getenv("NASS_API_KEY")))) {
+    stop(
+      "\n----------------------------------------------------------------------\n",
+      " The data pipeline (scripts 01 and 01b) needs a USDA NASS API key.\n",
+      "   1. Get a free key (instant, by email): https://quickstats.nass.usda.gov/api\n",
+      "   2. Copy .Renviron.example to .Renviron (in this repo root) and paste\n",
+      "      your key:   NASS_API_KEY=YOUR-KEY-HERE\n",
+      "   3. Restart R and run this file again.\n",
+      "\n Or skip the rebuild entirely — this repo ships the computed outputs,\n",
+      " so run:   RUN_DATA_PIPELINE=FALSE   to just render the existing page.\n",
+      "----------------------------------------------------------------------\n",
+      call. = FALSE)
+  }
+}
+
 if (RUN_DATA_PIPELINE) for (s in scripts) run_one(s)
 
 # ---- render the dashboard ------------------------------------

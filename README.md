@@ -38,9 +38,26 @@ dashboard immediately without an API key or any large downloads** (see Option A)
 - R packages: `tidyverse`, `here`, `scales`, `sf`, `terra`, `leaflet`, `htmltools`,
   `tigris`, `rmapshaper`, `rnassqs`, `CropScapeR`, `ggplot2`.
   Running `scripts/R/00_setup.R` once installs anything missing.
-- For the **full data pull** (Option B), a free USDA NASS QuickStats API key
-  (https://quickstats.nass.usda.gov/api) placed in a `.Renviron` file at the repo root:
-  `NASS_API_KEY=your_key_here`. *(Not needed for Option A.)*
+- A **USDA NASS QuickStats API key** — needed **only** if you rebuild the data from
+  scratch (pipeline scripts `01_get_nass.R` and `01b_nass_explore.R`). **Not needed**
+  just to render the dashboard from the shipped outputs.
+
+#### Getting & setting the NASS API key
+
+Only the two NASS scripts (`01`, `01b`) require this; everything else runs without it.
+
+1. **Get a free key** (instant — it's emailed to you): **https://quickstats.nass.usda.gov/api**
+2. **Where to paste it:** copy the file **`.Renviron.example`** (in the repo root) to a new
+   file named **`.Renviron`** in the same folder, and paste your key after the `=`:
+   ```
+   NASS_API_KEY=YOUR-KEY-HERE
+   ```
+   No quotes, no spaces around `=`. (`.Renviron` is git-ignored, so your key never gets
+   committed.)
+3. **Restart R** (RStudio: *Session → Restart R*) so the key loads, then run as usual.
+
+If you run `run_all.R` with the data pipeline on but no key, it stops with a message
+pointing you to these exact steps — so you'll always know what's missing and where.
 
 ### Option 0 — one click (recommended)
 

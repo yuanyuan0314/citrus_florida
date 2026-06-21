@@ -1,0 +1,16 @@
+# ---------------------------------------------------------------------------
+# USDA NASS QuickStats API key  (needed ONLY to rebuild data: scripts 01, 01b)
+#
+# HOW TO USE:
+#   1. Request a free key (instant, emailed to you):
+#          https://quickstats.nass.usda.gov/api
+#   2. Rename / copy this file to ".Renviron" (no .example) in this same
+#      folder — the repo root.
+#   3. Replace PASTE-YOUR-KEY-HERE below with your key. Keep the
+#      "NASS_API_KEY=" prefix, no quotes, no spaces around the = sign.
+#   4. Restart R (RStudio: Session > Restart R) so the key loads.
+#
+# Not rebuilding the data? You don't need this at all — the repo ships the
+# computed outputs, so run_all.R renders the dashboard without a key.
+# ---------------------------------------------------------------------------
+NASS_API_KEY=PASTE-YOUR-KEY-HERE

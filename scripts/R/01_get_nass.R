@@ -37,14 +37,21 @@ out_dir <- here("scripts", "R", "_outputs")
 dir.create(raw_dir, recursive = TRUE, showWarnings = FALSE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-# .Renviron is only read at R startup; load it now if needed.
+# >>> NASS API KEY REQUIRED HERE <<<
+# This script downloads from USDA NASS QuickStats, which needs a free API key.
+#   1. Request a key (instant, emailed to you): https://quickstats.nass.usda.gov/api
+#   2. Create a plain-text file named  .Renviron  in the repo root containing:
+#          NASS_API_KEY=YOUR-KEY-HERE
+#      (a ready-to-edit template is provided: copy .Renviron.example to .Renviron)
+#   3. Restart R (Session > Restart R) so the key loads, then run this script.
+# .Renviron is only read at R startup; we also load it here if needed.
 api_key <- trimws(Sys.getenv("NASS_API_KEY"))
 if (!nzchar(api_key) && file.exists(here(".Renviron"))) {
   readRenviron(here(".Renviron"))
   api_key <- trimws(Sys.getenv("NASS_API_KEY"))
 }
 stopifnot(
-  "NASS_API_KEY still empty after readRenviron — confirm .Renviron is at the repo root and contains NASS_API_KEY=..., then restart R (Session > Restart R)." =
+  "NASS_API_KEY not found. Get a free key at https://quickstats.nass.usda.gov/api and put 'NASS_API_KEY=your_key' in a .Renviron file at the repo root, then restart R (Session > Restart R)." =
     nzchar(api_key))
 nassqs_auth(key = api_key)
 message("NASS key loaded (", nchar(api_key), " chars).")
