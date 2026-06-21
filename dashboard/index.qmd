@@ -1,0 +1,622 @@
+---
+title: "Florida Citrus in Decline"
+format:
+  dashboard:
+    theme: cosmo
+    orientation: rows
+    scrolling: true
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(here)
+library(scales)
+library(sf)
+library(leaflet)
+library(htmltools)
+source(here("dashboard", "R", "theme_dashboard.R"))
+
+out  <- function(f) here("scripts", "R", "_outputs", f)
+have <- function(f) file.exists(out(f))
+
+# --- State decline series (headline) -----------------------------------
+nass_state <- readRDS(out("nass_state.rds"))
+
+state_bearing <- nass_state |>
+  filter(statcat == "AREA BEARING", str_detect(coalesce(unit, ""), "ACRE"),
+         !is.na(acres))
+
+if (any(state_bearing$commodity == "CITRUS TOTALS")) {
+  decline <- state_bearing |>
+    filter(commodity == "CITRUS TOTALS") |>
+    group_by(year) |>
+    summarise(acres = sum(acres), .groups = "drop")
+  decline_label <- "All citrus (NASS 'CITRUS TOTALS')"
+} else {
+  decline <- state_bearing |>
+    group_by(year) |>
+    summarise(acres = sum(acres), .groups = "drop")
+  decline_label <- "All citrus (summed across commodities)"
+}
+decline <- arrange(decline, year)
+
+peak     <- slice_max(decline, acres, n = 1, with_ties = FALSE)
+latest   <- slice_max(decline, year,  n = 1, with_ties = FALSE)
+pct_drop <- round(100 * (peak$acres - latest$acres) / peak$acres)
+
+# --- State-level production, value, operators (from nass_fl_state) ------
+state_long <- if (have("nass_fl_state.rds")) readRDS(out("nass_fl_state.rds")) else NULL
+
+# Defensive series picker: filters CITRUS TOTALS by unit/statcat/short_desc,
+# then keeps the single short_desc with the most observations (the main series).
+pick_series <- function(df, unit_exact = NULL, statcat_rx = NULL, short_rx = NULL,
+                        comm = "CITRUS TOTALS") {
+  if (is.null(df)) return(NULL)
+  d <- filter(df, commodity == comm, !is.na(value))
+  if (!is.null(unit_exact)) d <- filter(d, unit == unit_exact)
+  if (!is.null(statcat_rx)) d <- filter(d, str_detect(coalesce(statcat, ""), statcat_rx))
+  if (!is.null(short_rx))   d <- filter(d, str_detect(coalesce(short_desc, ""), short_rx))
+  if (nrow(d) == 0) return(NULL)
+  best <- d |> count(short_desc, sort = TRUE) |> slice(1) |> pull(short_desc)
+  d |> filter(short_desc == best) |>
+    group_by(year) |> summarise(value = sum(value, na.rm = TRUE), .groups = "drop") |>
+    arrange(year)
+}
+
+# Citrus-totals production is in TONS (utilized = total used); value is the
+# packinghouse-door equivalent "$, PHD EQUIV" series — not BOXES / plain "$".
+prod_series  <- pick_series(state_long, unit_exact = "TONS", statcat_rx = "PRODUCTION", short_rx = "UTILIZED")
+value_series <- pick_series(state_long, unit_exact = "$, PHD EQUIV", statcat_rx = "PRODUCTION")
+
+# Operations is CENSUS-only -> read the dedicated state-Census operations file.
+oper_long   <- if (have("nass_fl_state_operations.rds")) readRDS(out("nass_fl_state_operations.rds")) else NULL
+oper_series <- pick_series(oper_long, unit_exact = "OPERATIONS", short_rx = "BEARING & NON-BEARING")
+if (is.null(oper_series)) oper_series <- pick_series(oper_long, unit_exact = "OPERATIONS")
+
+latest_row <- function(s) if (is.null(s) || nrow(s) == 0) NULL else
+  slice_max(s, year, n = 1, with_ties = FALSE)
+prod_latest  <- latest_row(prod_series)
+value_latest <- latest_row(value_series)
+oper_latest  <- latest_row(oper_series)
+
+# Trend-chart helper (returns a placeholder if the series is missing)
+trend_chart <- function(s, ylab, color = oi[["blue"]], points = FALSE) {
+  if (is.null(s) || nrow(s) == 0)
+    return(ggplot() + annotate("text", x = 0, y = 0, label = "series not found") +
+             theme_void())
+  g <- ggplot(s, aes(year, value)) + geom_line(color = color, linewidth = 1)
+  if (points) g <- g + geom_point(color = color, size = 1.5)
+  g + scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+    labs(x = NULL, y = ylab, caption = src_note("USDA NASS QuickStats.")) +
+    theme_dashboard()
+}
+fmt_short  <- label_number(scale_cut = cut_short_scale())
+fmt_dollar <- label_dollar(scale_cut = cut_short_scale())
+
+# --- County ranking ----------------------------------------------------
+county_ranking <- readRDS(out("county_ranking.rds"))
+rank_year <- str_extract(county_ranking$rank_basis[1], "\\d{4}")
+
+# --- Solar (USPVDB) ----------------------------------------------------
+uspvdb  <- readRDS(out("uspvdb_fl.rds")) |> st_drop_geometry() |> as_tibble()
+cap_col <- intersect(c("p_cap_dc", "p_cap_ac"), names(uspvdb))[1]
+solar <- uspvdb |>
+  filter(!is.na(p_year)) |>
+  mutate(year = as.integer(p_year), mw = .data[[cap_col]]) |>
+  group_by(year) |>
+  summarise(mw_added = sum(mw, na.rm = TRUE), n_added = n(), .groups = "drop") |>
+  arrange(year) |>
+  mutate(mw_cumulative = cumsum(mw_added))
+solar_vintage <- if ("vintage" %in% names(uspvdb)) uspvdb$vintage[1] else "USPVDB"
+
+# --- County choropleths (built by 04_county_choropleth.R) --------------
+# Each element is a long sf with all census years stacked; we add one
+# polygon layer per year and a radio "baseGroups" control to switch years.
+choro <- if (have("county_choropleth.rds")) readRDS(out("county_choropleth.rds")) else NULL
+palettes <- list(bearing = "YlGn", operations = "BuPu", nonbearing = "Oranges")
+
+render_year_map <- function(key, note = NULL, default_year = NULL) {
+  if (is.null(choro) || is.null(choro[[key]]) || nrow(choro[[key]]) == 0) {
+    return(HTML(paste0(
+      "<p style='padding:1em'><em>Run <code>scripts/R/04_county_choropleth.R</code> ",
+      "to build this map.</em></p>")))
+  }
+  x    <- choro[[key]]
+  # Shared color scale across years so 2002 and 2022 are directly comparable.
+  pal  <- colorBin(palettes[[key]] %||% "YlOrBr", domain = x$value,
+                   bins = 6, na.color = "#e0e0e0")
+  yrs  <- sort(unique(x$year))                      # ascending: 2002 ... 2022
+  dy   <- if (!is.null(default_year) && default_year %in% yrs) default_year else max(yrs)
+
+  m <- leaflet() |>
+    addProviderTiles("CartoDB.Positron") |>
+    setView(lng = -81.6, lat = 27.9, zoom = 6)
+  for (yr in yrs) {
+    m <- addPolygons(
+      m, data = x[x$year == yr, ], group = as.character(yr),
+      fillColor = ~pal(value), weight = 1, color = "white", fillOpacity = 0.85,
+      label = ~lapply(label, HTML),
+      highlightOptions = highlightOptions(weight = 2, color = "#333",
+                                          fillOpacity = 1, bringToFront = TRUE))
+  }
+  m <- m |>
+    addLayersControl(baseGroups = as.character(yrs),
+                     options = layersControlOptions(collapsed = FALSE)) |>
+    addLegend(pal = pal, values = x$value,
+              title = paste0(x$title[1], "<br>(", x$unit[1], ")"),
+              position = "bottomright", opacity = 0.85)
+  if (!is.null(note)) m <- addControl(m, html = note, position = "topleft")
+  # Default to `dy` (e.g. 2002); the radio switches the rest.
+  for (yr in setdiff(yrs, dy)) m <- hideGroup(m, as.character(yr))
+  m
+}
+
+# --- USPVDB solar facilities map (from uspvdb_fl.rds) ------------------
+# Facilities are small polygons; we plot their centroids as circle markers
+# (radius ~ AC capacity) with two switchable color layers: year online and
+# AC capacity. Hover shows the key facility attributes.
+uspvdb_sf      <- if (have("uspvdb_fl.rds"))      readRDS(out("uspvdb_fl.rds"))      else NULL
+solar_county   <- if (have("solar_county.rds"))   readRDS(out("solar_county.rds"))   else NULL
+bearing_change <- if (have("bearing_change.rds")) readRDS(out("bearing_change.rds")) else NULL
+
+# Solar map: one facilities-geometry overlay + three county zonal-stat base
+# layers (earliest year / total AC / total area), with county boundaries.
+render_solar_map <- function() {
+  if (is.null(solar_county) && is.null(uspvdb_sf))
+    return(HTML(paste0("<p style='padding:1em'><em>Run ",
+      "<code>scripts/R/07_solar_zonal.R</code> to build the solar map.</em></p>")))
+  m <- leaflet(options = leafletOptions(preferCanvas = TRUE)) |>
+    addProviderTiles("CartoDB.Positron") |>
+    setView(lng = -82.3, lat = 28.2, zoom = 6)
+  ov <- character(0)
+  gA <- "County: earliest solar year"; gB <- "County: total AC (MW)"; gC <- "County: total area (ac)"
+  if (!is.null(solar_county)) {
+    sc <- solar_county
+    pal_yr <- colorNumeric("YlGnBu", sc$earliest_year, na.color = "#f0f0f0")
+    pal_ac <- colorNumeric("YlOrRd", sc$total_ac,      na.color = "#f0f0f0")
+    pal_ar <- colorNumeric("BuPu",   sc$total_area,    na.color = "#f0f0f0")
+    sc$l_yr <- paste0("<b>", sc$county, " County</b><br>Earliest solar: ",
+                      ifelse(is.na(sc$earliest_year), "none", sc$earliest_year),
+                      "<br>Facilities: ", coalesce(as.integer(sc$n_facilities), 0L))
+    sc$l_ac <- paste0("<b>", sc$county, " County</b><br>Total AC: ",
+                      ifelse(is.na(sc$total_ac), "0", comma(round(sc$total_ac))), " MW")
+    sc$l_ar <- paste0("<b>", sc$county, " County</b><br>Total facility area: ",
+                      ifelse(is.na(sc$total_area), "0", comma(round(sc$total_area))), " ac")
+    m <- m |>
+      # always-on county outline so boundaries persist when choropleths are off
+      addPolygons(data = sc, fill = FALSE, color = "#9a9a9a", weight = 0.6, opacity = 0.7) |>
+      addPolygons(data = sc, group = gA, fillColor = ~pal_yr(earliest_year),
+        stroke = FALSE, fillOpacity = 0.8, label = ~lapply(l_yr, HTML)) |>
+      addPolygons(data = sc, group = gB, fillColor = ~pal_ac(total_ac),
+        stroke = FALSE, fillOpacity = 0.8, label = ~lapply(l_ac, HTML)) |>
+      addPolygons(data = sc, group = gC, fillColor = ~pal_ar(total_area),
+        stroke = FALSE, fillOpacity = 0.8, label = ~lapply(l_ar, HTML)) |>
+      addLegend("bottomleft", pal = pal_yr, values = sc$earliest_year,
+                title = "Earliest solar yr", group = gA) |>
+      addLegend("bottomleft", pal = pal_ac, values = sc$total_ac,
+                title = "Total AC (MW)", group = gB) |>
+      addLegend("bottomleft", pal = pal_ar, values = sc$total_area,
+                title = "Total area (ac)", group = gC)
+    ov <- c(gA, gB, gC)
+  }
+  if (!is.null(uspvdb_sf)) {
+    fac <- st_transform(uspvdb_sf, 4326)
+    ctr <- suppressWarnings(st_point_on_surface(st_geometry(fac)))
+    xy  <- st_coordinates(ctr)
+    fd  <- st_drop_geometry(fac)
+    fd$lng <- xy[, 1]; fd$lat <- xy[, 2]
+    fd$.lab <- paste0("<b>", coalesce(as.character(fd$p_name), "facility"), "</b><br>",
+                      "Year: ", fd$p_year, " &middot; AC: ", round(fd$p_cap_ac, 1), " MW")
+    m <- m |> addCircleMarkers(data = fd, lng = ~lng, lat = ~lat, group = "Facilities",
+      radius = 4, stroke = FALSE, fillColor = "#111111", fillOpacity = 0.85,
+      label = ~lapply(.lab, HTML))   # radius in PIXELS -> fixed size at any zoom
+    ov <- c(ov, "Facilities")
+  }
+  m <- m |> addLayersControl(overlayGroups = ov, position = "topright",
+      options = layersControlOptions(collapsed = FALSE))
+  # default: only the Facilities layer on; the three county choropleths off
+  for (g in setdiff(ov, "Facilities")) m <- hideGroup(m, g)
+  m
+}
+
+# Citrus bearing-acreage change 2002 -> 2022 by county (diverging palette).
+render_bearing_change <- function() {
+  if (is.null(bearing_change) || nrow(bearing_change) == 0)
+    return(HTML(paste0("<p style='padding:1em'><em>Run ",
+      "<code>scripts/R/04_county_choropleth.R</code> to build this map.</em></p>")))
+  x   <- bearing_change
+  rng <- max(abs(x$delta), na.rm = TRUE)
+  pal <- colorNumeric("RdBu", domain = c(-rng, rng), na.color = "#f0f0f0")
+  leaflet(x, options = leafletOptions(preferCanvas = TRUE)) |>
+    addProviderTiles("CartoDB.Positron") |>
+    setView(lng = -82.3, lat = 28.2, zoom = 6) |>
+    addPolygons(fillColor = ~pal(delta), color = "#777", weight = 0.6,
+      fillOpacity = 0.85, label = ~lapply(label, HTML)) |>
+    addLegend("bottomright", pal = pal, values = x$delta,
+      title = "&Delta; bearing ac<br>2002 &rarr; 2022")
+}
+
+# --- CDL citrus transition (from 06_cdl_transition.R) -----------------
+cdl_trans  <- if (have("cdl_hendry_citrus_transition.rds")) readRDS(out("cdl_hendry_citrus_transition.rds")) else NULL
+cdl_change <- if (have("cdl_hendry_change.rds")) readRDS(out("cdl_hendry_change.rds")) else NULL
+cdl_extent <- if (have("cdl_hendry_extent.rds")) readRDS(out("cdl_hendry_extent.rds")) else NULL
+dor_parcels <- if (have("dor_hendry_citrus_parcels.rds")) readRDS(out("dor_hendry_citrus_parcels.rds")) else NULL
+
+render_cdl_map <- function() {
+  if (is.null(cdl_change) && is.null(cdl_extent))
+    return(HTML(paste0("<p style='padding:1em'><em>Run ",
+      "<code>scripts/R/06_cdl_transition.R</code> to build the overlay map.</em></p>")))
+  m <- leaflet(options = leafletOptions(preferCanvas = TRUE)) |>
+    addProviderTiles("CartoDB.Positron") |>
+    setView(lng = -81.4, lat = 26.55, zoom = 9)   # Hendry County
+
+  G <- c(g08 = "Citrus 2008", g25 = "Citrus 2025",
+         gain = "Gained (2025, not 2008)", lost = "Lost (2008, not 2025)")
+
+  # Layers 1 & 2: each year's full citrus extent (lighter, so overlays read)
+  if (!is.null(cdl_extent) && nrow(cdl_extent) > 0) {
+    e08 <- cdl_extent[cdl_extent$year == min(cdl_extent$year), ]
+    e25 <- cdl_extent[cdl_extent$year == max(cdl_extent$year), ]
+    if (nrow(e08)) m <- addPolygons(m, data = e08, group = G[["g08"]],
+      fillColor = "#7fbf7b", stroke = FALSE, fillOpacity = 0.45, label = G[["g08"]])
+    if (nrow(e25)) m <- addPolygons(m, data = e25, group = G[["g25"]],
+      fillColor = "#9ecae1", stroke = FALSE, fillOpacity = 0.45, label = G[["g25"]])
+  }
+  # Layers 3 & 4: gained / lost (solid, the headline change)
+  if (!is.null(cdl_change)) {
+    gain <- cdl_change[cdl_change$category == "Gained (2025 only)", ]
+    lost <- cdl_change[cdl_change$category == "Lost (2008 only)", ]
+    if (nrow(gain)) m <- addPolygons(m, data = gain, group = G[["gain"]],
+      fillColor = "#1b9e77", stroke = FALSE, fillOpacity = 0.85, label = G[["gain"]])
+    if (nrow(lost)) m <- addPolygons(m, data = lost, group = G[["lost"]],
+      fillColor = "#d7191c", stroke = FALSE, fillOpacity = 0.85, label = G[["lost"]])
+  }
+
+  # 5th layer: actual DOR citrus parcels (use code 66), 2025 — administrative
+  # parcels vs the CDL-derived extents.
+  pgrp     <- "DOR citrus parcels (2025)"
+  groups   <- unname(G)
+  leg_cols <- c("#7fbf7b", "#9ecae1", "#1b9e77", "#d7191c")
+  leg_labs <- unname(G)
+  if (!is.null(dor_parcels) && nrow(dor_parcels) > 0) {
+    m <- addPolygons(m, data = dor_parcels, group = pgrp,
+      fillColor = "#6a51a3", stroke = FALSE, fillOpacity = 0.8,
+      label = ~lapply(label, HTML))
+    groups   <- c(groups, pgrp)
+    leg_cols <- c(leg_cols, "#6a51a3"); leg_labs <- c(leg_labs, pgrp)
+  }
+  m <- m |>
+    addLayersControl(overlayGroups = groups,
+                     options = layersControlOptions(collapsed = FALSE)) |>
+    addLegend(colors = leg_cols, labels = leg_labs,
+              title = "Layers", position = "bottomright") |>
+    hideGroup(G[["g08"]]) |> hideGroup(G[["g25"]])   # extents start hidden
+  if (!is.null(dor_parcels)) m <- hideGroup(m, pgrp) # DOR parcels start hidden
+  m <- addControl(m, position = "topleft", html = paste0(
+    "<div style='background:rgba(255,255,255,0.92);padding:9px 12px;border-radius:6px;",
+    "max-width:290px;font-size:12px;line-height:1.4;box-shadow:0 1px 4px rgba(0,0,0,.25)'>",
+    "<b>Citrus orchards in Hendry, 2008 &rarr; 2025</b><br>",
+    "&bull; Most of the 2008 citrus footprint disappeared by 2025 &mdash; only about an eighth is still citrus.<br>",
+    "&bull; The CDL extent and the DOR citrus parcels overlap closely, but DOR misses some small, fragmented citrus pieces.</div>"))
+  m
+}
+
+# --- DOR citrus parcel polygons (from 05_get_dor_parcels.R) -----------
+parcels_sf <- if (have("dor_citrus_parcels.rds")) readRDS(out("dor_citrus_parcels.rds")) else NULL
+
+render_parcel_map <- function() {
+  if (is.null(parcels_sf) || nrow(parcels_sf) == 0)
+    return(HTML(paste0("<p style='padding:1em'><em>Run ",
+      "<code>scripts/R/05_get_dor_parcels.R</code> to build the parcel polygons.</em></p>")))
+  x   <- parcels_sf
+  pal <- colorBin("YlGn", domain = x$jv_per_acre, bins = 5,
+                  na.color = "#e0e0e0", pretty = TRUE)
+  leaflet(x, options = leafletOptions(preferCanvas = TRUE)) |>
+    addProviderTiles("CartoDB.Positron") |>
+    addPolygons(
+      fillColor = ~pal(jv_per_acre), weight = 0.4, color = "#666", fillOpacity = 0.8,
+      label = ~lapply(label, HTML), smoothFactor = 0.5,
+      highlightOptions = highlightOptions(weight = 2, color = "#000", bringToFront = TRUE)) |>
+    addLegend("bottomright", pal = pal, values = ~jv_per_acre,
+              title = "Just value<br>per acre ($)", position = "bottomright", opacity = 0.85)
+}
+```
+
+# The Decline
+
+## Row {height="200px"}
+
+```{r}
+#| content: valuebox
+list(title = paste0("Peak bearing acreage (", peak$year, ")"),
+     value = comma(round(peak$acres)), icon = "tree-fill", color = "success")
+```
+
+```{r}
+#| content: valuebox
+list(title = paste0("Latest bearing acreage (", latest$year, ")"),
+     value = comma(round(latest$acres)), icon = "graph-down-arrow", color = "warning")
+```
+
+```{r}
+#| content: valuebox
+list(title = paste0("Decline since ", peak$year),
+     value = paste0(pct_drop, "%"), icon = "exclamation-triangle-fill", color = "danger")
+```
+
+```{r}
+#| content: valuebox
+list(title = if (!is.null(prod_latest)) paste0("State production (", prod_latest$year, ")") else "State production",
+     value = if (!is.null(prod_latest)) paste0(fmt_short(prod_latest$value), " tons") else "n/a",
+     icon = "box-seam", color = "primary")
+```
+
+```{r}
+#| content: valuebox
+list(title = if (!is.null(value_latest)) paste0("State value of production (", value_latest$year, ")") else "State value",
+     value = if (!is.null(value_latest)) fmt_dollar(value_latest$value) else "n/a",
+     icon = "cash-stack", color = "info")
+```
+
+```{r}
+#| content: valuebox
+list(title = if (!is.null(oper_latest)) paste0("Citrus operations (", oper_latest$year, ")") else "Citrus operations",
+     value = if (!is.null(oper_latest)) comma(round(oper_latest$value)) else "n/a",
+     icon = "people-fill", color = "secondary")
+```
+
+## Row {height="360px"}
+
+```{r}
+#| title: "Florida citrus bearing acreage over time"
+ggplot(decline, aes(year, acres)) +
+  geom_line(color = oi[["blue"]], linewidth = 1) +
+  geom_point(color = oi[["blue"]], size = 1) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x = NULL, y = "Bearing acres",
+       subtitle = paste0(decline_label, ", ", min(decline$year), "–", max(decline$year)),
+       caption = src_note("USDA NASS QuickStats (SURVEY), Florida citrus.")) +
+  theme_dashboard()
+```
+
+```{r}
+#| title: "State citrus production (tons, utilized)"
+trend_chart(prod_series, "Tons", color = oi[["blue"]])
+```
+
+## Row {height="360px"}
+
+```{r}
+#| title: "State value of production ($)"
+trend_chart(value_series, "US$", color = oi[["green"]])
+```
+
+```{r}
+#| title: "Citrus operations (count)"
+trend_chart(oper_series, "Operations", color = oi[["vermilion"]], points = TRUE)
+```
+
+# Key Takeaways & Thoughts
+
+## Row
+
+::: {.card title="Preliminary findings"}
+
+These are **descriptive patterns** from the public data assembled here.
+
+- **A northward shift in citrus production.** The historic southern core still ranks highest, but production in those leading counties has fallen sharply in magnitude, while northern counties have grown from a near-zero base.
+- **Southern producers are exiting while northern producers are entering.** Operations with bearing citrus decline across the southern core yet rise in the north over successive census years.
+- **Active grove renewal in the large counties.** Their relatively high non-bearing acreage reflects replanting after tree removal, scale expansion, or new plantings — reinvestment concentrated where production is largest.
+
+:::
+
+## Row
+
+::: {.card title="Other possible influencing factors"}
+
+- **Abandoned Groves Initiative.** HLB-hit groves are left standing but unproductive — the problem this initiative targets.
+  - Often still classed as agricultural for years (Greenbelt; cost-share keeps the classification ~10 yrs).
+  - They host psyllids, spreading disease to neighbouring groves.
+  - They blur "citrus" vs "exited" in both CDL and DOR data.
+- **Drought, Hurricane Ian, and heat.** In NASS's words: *"Growers, trying to overcome existing conditions, were pushing unproductive older trees and putting resets in the ground."* *(NASS, Florida Citrus Statistics 2023-24.)*
+
+:::
+
+# Where the Citrus Is
+
+Use the radio control on each map to switch census year (2002–2022). Hover a county for its value and its rank among Florida counties. Counties with suppressed/zero data are grey. County-level production is not collected by the Census (production is state-only), so these maps use the census's county measures: planted acreage and number of operations.
+
+## Row {height="540px"}
+
+```{r}
+#| title: "Bearing acreage by county — select year"
+render_year_map("bearing", default_year = 2002, note = paste0(
+  "<div style='background:rgba(255,255,255,0.92);padding:9px 12px;border-radius:6px;",
+  "max-width:285px;font-size:12px;line-height:1.4;box-shadow:0 1px 4px rgba(0,0,0,.25)'>",
+  "<b>Bearing acreage &mdash; preliminary finding</b><br>",
+  "&bull; Production is concentrated in a few southern counties &mdash; Polk, Highlands, Hendry, and St. Lucie.<br>",
+  "&bull; Bearing acreage in these counties has declined over time &mdash; still the largest producers, but at a smaller scale.<br>",
+  "&bull; Northern counties have emerged from a near-zero base, gradually entering citrus production.<br>",
+  "<b>Overall trend: a gradual northward shift in citrus production.</b></div>"))
+```
+
+## Row {height="460px"}
+
+```{r}
+#| title: "Operations with bearing citrus — select year"
+render_year_map("operations", default_year = 2002)
+```
+
+```{r}
+#| title: "Non-bearing acreage (new / replant) — select year"
+render_year_map("nonbearing", default_year = 2002, note = paste0(
+  "<div style='background:rgba(255,255,255,0.92);padding:9px 12px;border-radius:6px;",
+  "max-width:285px;font-size:12px;line-height:1.4;box-shadow:0 1px 4px rgba(0,0,0,.25)'>",
+  "<b>Non-bearing acreage</b><br>",
+  "&bull; Large producing counties keep a relatively higher non-bearing acreage over time.<br>",
+  "&bull; Non-bearing acreage in northern counties by 2022 can suggest new investment in citrus up north.<br>",
+  "&bull; Why land is non-bearing: replacing sick or old trees, or orchard expansion (new investment).</div>"))
+```
+
+# Where It Went
+
+## Row {height="540px"}
+
+```{r}
+#| title: "Citrus Orchards in Hendry County"
+render_cdl_map()
+```
+
+## Row {height="460px"}
+
+```{r}
+#| title: "What Hendry's 2008 citrus became by 2025 (CDL)"
+if (is.null(cdl_trans)) {
+  g <- ggplot() +
+    annotate("text", x = 0, y = 0,
+             label = "Run scripts/R/06_cdl_transition.R to build this") +
+    theme_void()
+} else {
+  kept_pct <- round(sum(cdl_trans$pct[cdl_trans$category == "Citrus (unchanged)"]))
+  g <- cdl_trans |>
+    mutate(cat_label = if ("codes" %in% names(cdl_trans))
+                         paste0(category, "  [CDL ", codes, "]") else category,
+           cat_label = fct_reorder(cat_label, acres),
+           kept = if_else(category == "Citrus (unchanged)", "Still citrus", "Converted")) |>
+    ggplot(aes(acres, cat_label, fill = kept)) +
+    geom_col() +
+    geom_text(aes(label = paste0(round(pct), "%")), hjust = -0.15, size = 3.2) +
+    scale_fill_manual(values = c("Still citrus" = oi[["green"]],
+                                 "Converted"    = oi[["vermilion"]])) +
+    scale_x_continuous(labels = label_comma(), expand = expansion(mult = c(0, 0.18))) +
+    labs(x = "Acres of 2008 citrus", y = NULL, fill = NULL,
+         subtitle = paste0(comma(round(cdl_trans$total_2008_citrus_acres[1])),
+                           " ac 2008 citrus · ", kept_pct, "% still citrus by 2025"),
+         caption = src_note("USDA CDL, Hendry County, 2008 → 2025.")) +
+    theme_dashboard()
+}
+g
+```
+
+::: {.card title="How to read this"}
+
+- **Source:** satellite land cover (CDL), not parcel records.
+- **Read it as direction of travel**, not exact acres — CDL misclassifies Florida crops.
+- **"Still citrus" (green)** = land classed citrus in both 2008 and 2025.
+- A true **parcel-level** transition needs historical DOR use codes — only public from 2024 (a data-acquisition task).
+
+:::
+
+## Row
+
+```{r}
+#| title: "Parcel-level summary — Florida DOR tax roll, use code 66 (citrus)"
+#| output: asis
+if (have("nal_citrus_summary_top2.rds")) {
+  s <- readRDS(out("nal_citrus_summary_top2.rds"))
+  tbl <- s |>
+    transmute(County           = str_to_title(county_name),
+              `Citrus parcels` = comma(n_parcels),
+              `Total acres`    = comma(round(total_acres)),
+              `Just value`     = dollar(total_just_value, accuracy = 1),
+              `$/acre`         = dollar(round(jv_per_acre)),
+              `Sold 2020+`     = n_sold_2020plus)
+  cat(knitr::kable(tbl), sep = "\n")
+} else {
+  cat("> **Pending:** run `scripts/R/03_get_dor_nal.R` to populate parcel-level",
+      "counts, acreage, and land values for the top-2 counties (Polk, Hendry)",
+      "from the Florida DOR parcel tax roll (use code 66 = citrus groves).", sep = "\n")
+}
+```
+
+# Solar Facility
+
+## Row {height="560px"}
+
+```{r}
+#| title: "Solar by county (earliest year / total AC / total area)"
+render_solar_map()
+```
+
+```{r}
+#| title: "Citrus bearing-acreage change by county, 2002 → 2022"
+render_bearing_change()
+```
+
+## Row {height="400px"}
+
+```{r}
+#| title: "Cumulative solar capacity online"
+ggplot(solar, aes(year, mw_cumulative)) +
+  geom_area(fill = oi[["orange"]], alpha = 0.5) +
+  geom_line(color = oi[["vermilion"]], linewidth = 1) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(x = NULL, y = "Cumulative MW online",
+       caption = src_note(paste0(solar_vintage, " (≥1 MW facilities)."))) +
+  theme_dashboard()
+```
+
+::: {.card title="Driver context (qualitative)"}
+
+- **HLB (citrus greening):** first U.S. detection south Miami-Dade, **Aug 2005**; 32 FL counties by 2008.
+- **Urban development:** grove removal is quasi-irreversible, so exit timing carries **option value** (Capozza–Helsley). Urban-fringe parcels face conversion pressure competing with replanting.
+- **Solar:** utility-scale PV takes ~2.8–4.2 acres/MWdc; mechanically small vs. total citrus loss, so the question is *which* parcels convert, not the aggregate.
+
+*Transition matrices (citrus → developed / other ag / fallow / solar) come from the CDL pipeline (next step, B3).*
+
+:::
+
+# Methods & Research Agenda
+
+::: {.card title="From description to structure — the modeling ladder"}
+
+1. **Descriptive transitions** — CDL year-pair cross-tabs (citrus → developed / other ag / fallow / solar), with satellite-misclassification correction (Torchiana et al. 2025).
+2. **Reduced-form credibility layer** — staggered event-study off HLB county arrival (Callaway–Sant'Anna 2021; Sun–Abraham 2021); honest about fuzzy timing and SUTVA from disease/market spillovers; Conley spatial SEs.
+3. **Static discrete choice** — multinomial/nested logit on use-specific net returns (Lubowski–Plantinga–Stavins): HLB-degraded citrus budgets vs. DOR land values vs. solar lease offers. IIA caveat — solar enters the choice set mid-panel.
+4. **Competing-risks hazard** — citrus-exit timing to {developed, other ag, idle, solar} with time-varying covariates (Towe–Nickerson–Bockstael 2008; Cunningham 2006).
+5. **Dynamic structural** — the lasting contribution: ECCP estimation (Kalouptsidi–Scott–Souza-Rodrigues 2021; Scott 2014). Buys counterfactuals: HLB cure, solar subsidies, zoning.
+
+**Theory thread:** citrus is a perennial — removal is quasi-irreversible, so slow exit under HLB can be *rational waiting*. Option value (Capozza–Helsley 1989/1990; Schatzki 2003 measured wedges of 7–81% of land value) is what a structural model quantifies.
+
+:::
+
+# Data & Next Steps
+
+## Row
+
+::: {.card title="Data used in this dashboard"}
+
+| Dataset | What it provides | Source / access |
+|---|---|---|
+| **NASS QuickStats — Citrus (SURVEY, state)** | Bearing acreage; production (tons, utilized); value of production ($, PHD-equiv) | quickstats.nass.usda.gov via `rnassqs` |
+| **NASS Census of Agriculture (COUNTY)** | Bearing / non-bearing acreage; operations with bearing citrus; 2002–2022 | QuickStats (CENSUS program) |
+| **USDA Cropland Data Layer (CDL)** | 30 m land cover; citrus = classes **72 + 212**; Hendry 2008 & 2025 | CropScape via `CropScapeR` |
+| **USGS / LBNL USPVDB v4.0** | Utility-scale solar facility polygons; year online; AC capacity; area | energy.usgs.gov/uspvdb |
+| **Florida DOR — NAL tax roll** | Parcel attributes; use code **66 = citrus**; just value; sales (`SALE_YR1`) | floridarevenue.com Data Portal (2025) |
+| **Florida DOR — PAR parcel GIS** | Parcel polygons + `DOR_UC`; Hendry 2025 citrus (387 parcels) | DOR Data Portal, Map Data (2024–2025) |
+| **Census TIGER (`tigris`)** | Florida county boundaries | R `tigris` |
+| **NASS Florida Citrus Statistics 2023-24** | Drought / weather narrative (drivers) | FCS2024 |
+
+*Every figure traces to a versioned object in `scripts/R/_outputs/`; the dashboard reads only those outputs, never raw data.*
+
+:::
+
+## Row
+
+::: {.card title="Possible next steps — data to acquire / build"}
+
+- **Pre-2024 parcel-level use codes.** The DOR portal serves `DOR_UC` only for 2024–25 (parcel *geometry* goes back to 2005). A true parcel use-transition needs historical NAL rolls — request from the **Hendry County Property Appraiser**, **UF GeoPlan**, or the **EDR** archive.
+- **HLB detection timing & location.** Find a public, machine-readable county first-detection series (FDACS Citrus Health Response Program?). Dates are mostly approximate in the literature; a clean series would let the event-study identify disease timing.
+- **Weather indicators.** Add **drought** (U.S. Drought Monitor), temperature/precipitation (PRISM / ERA5), freeze events, and **hurricane** tracks (Irma 2017, Ian 2022) as time-varying covariates / confounders.
+- **Land-parcellation tracking.** Parcel IDs change on subdivision — follow land through splits/merges by **geometry overlay across years** to catch where *part* of a grove converted while the rest stayed citrus.
+- **Land-value panel.** DOR **NAV** assessed values exist 2010–2025 — build a parcel land-value series to test option-value / urban-fringe conversion.
+- **Solar siting.** Distance from citrus parcels to USPVDB facilities and transmission lines as a conversion driver.
+- **Structural model.** Dynamic discrete-choice land-use model (Scott 2014) once the parcel panel + covariates are assembled.
+
+:::
