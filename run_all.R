@@ -18,10 +18,11 @@
 #   * A free USDA NASS QuickStats API key in a .Renviron file at the
 #     repo root:  NASS_API_KEY=your_key   (needed for steps 1-2 only).
 #
-# Just want the webpage (no API key)?  The repo already ships the
-# computed scripts/R/_outputs/*.rds, so you can skip the data pulls:
-# set RUN_DATA_PIPELINE <- FALSE below (or run with the environment
-# variable RUN_DATA_PIPELINE=FALSE) to go straight to rendering.
+# ONE-RUN DEFAULT: the repo ships the computed scripts/R/_outputs/*.rds, so a
+# fresh clone renders the webpage straight away — no API key, no downloads.
+# The data pipeline runs automatically ONLY if those outputs are missing.
+# To force a full rebuild from raw data (needs a NASS key), run with the
+# environment variable RUN_DATA_PIPELINE=TRUE (or set it TRUE below).
 # ============================================================
 
 if (!requireNamespace("here", quietly = TRUE)) install.packages("here")
@@ -33,9 +34,13 @@ flag <- function(name, default) {
   if (is.na(v) || v == "") return(default)
   isTRUE(as.logical(v))
 }
-RUN_SETUP         <- flag("RUN_SETUP",         TRUE)  # install/refresh R packages
-RUN_DATA_PIPELINE <- flag("RUN_DATA_PIPELINE", TRUE)  # run the data scripts (NASS key needed for 1-2)
-RENDER_DASHBOARD  <- flag("RENDER_DASHBOARD",  TRUE)  # render dashboard/index.qmd -> index.html
+# If the precomputed outputs are already here, skip the data pulls by default
+# (so "just run this file" produces the webpage with no key). Missing outputs
+# -> rebuild them first.
+outputs_ready     <- file.exists(here("scripts", "R", "_outputs", "county_choropleth.rds"))
+RUN_SETUP         <- flag("RUN_SETUP",         TRUE)            # install missing R packages
+RUN_DATA_PIPELINE <- flag("RUN_DATA_PIPELINE", !outputs_ready)  # rebuild data only if outputs absent
+RENDER_DASHBOARD  <- flag("RENDER_DASHBOARD",  TRUE)            # render dashboard/index.qmd -> index.html
 
 # ---- the pipeline, in order ----------------------------------
 setup   <- "scripts/R/00_setup.R"

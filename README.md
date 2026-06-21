@@ -45,12 +45,15 @@ dashboard immediately without an API key or any large downloads** (see Option A)
 ### Option 0 — one click (recommended)
 
 Open **`run_all.R`** in RStudio and click **Source** (or run `Rscript run_all.R` from the
-repo root). It runs every analysis script in the right order and then renders the
-dashboard to `dashboard/index.html`. Steps 1–2 need a NASS API key (see Prerequisites).
+repo root). **That's it — one file produces the webpage.**
 
-Just want the webpage without an API key? The computed outputs are already shipped, so
-skip the data pulls — set `RUN_DATA_PIPELINE <- FALSE` near the top of `run_all.R`
-(or run `RUN_DATA_PIPELINE=FALSE Rscript run_all.R`) and it goes straight to rendering.
+Because the computed outputs (`scripts/R/_outputs/*.rds`) ship with the repo, a fresh
+clone renders the dashboard immediately — **no API key, no downloads needed.** The data
+pipeline runs automatically *only* if those outputs are missing.
+
+To rebuild everything from raw data (needs a free NASS API key — see Prerequisites),
+run with the pipeline forced on: `RUN_DATA_PIPELINE=TRUE Rscript run_all.R`
+(or set `RUN_DATA_PIPELINE <- TRUE` near the top of the file).
 
 The two options below are the same thing done by hand, if you prefer to run pieces yourself.
 
