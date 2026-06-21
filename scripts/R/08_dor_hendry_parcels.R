@@ -1,11 +1,13 @@
 # ============================================================
 # 08_dor_hendry_parcels.R — Hendry citrus parcels (DOR use code 66), 2025
 # Author: Yuanyuan Wen (with Claude Code)
-# Purpose: Read the manually-downloaded Hendry 2025 PAR parcel shapefile
+# Purpose: Download (cache-and-skip) the Hendry 2025 PAR parcel shapefile
 #          (geometry + NAL attributes incl DOR_UC), keep citrus parcels
 #          (DOR use code 66), and save an sf layer for the dashboard's
 #          CDL overlay map (administrative-parcel citrus vs satellite CDL).
-# Inputs:  data/raw/dor_nal/hendry_2025Ppar.zip
+# Inputs:  FL DOR Data Portal -> Map Data -> 2025F -> 2025F PAR:
+#          https://floridarevenue.com/property/dataportal/Documents/PTO%20Data%20Portal/Map%20Data/2025F/2025F%20PAR/hendry_2025Ppar.zip
+#          cached at data/raw/dor_nal/hendry_2025Ppar.zip
 # Outputs: scripts/R/_outputs/dor_hendry_citrus_parcels.rds  (sf 4326)
 # CRS:     EPSG:4326 for leaflet. No seed (INV-9 n/a). here() paths (INV-10).
 # ============================================================
@@ -15,8 +17,24 @@ sf::sf_use_s2(FALSE)
 
 raw <- here("data", "raw", "dor_nal")
 out <- function(f) here("scripts", "R", "_outputs", f)
+dir.create(raw, recursive = TRUE, showWarnings = FALSE)
+options(timeout = 600)
 
+# Download the Hendry 2025 PAR zip (cache-and-skip). Atomic: write to a .part
+# file and rename on success, so an interrupted download never poisons the cache.
+zip_url <- "https://floridarevenue.com/property/dataportal/Documents/PTO%20Data%20Portal/Map%20Data/2025F/2025F%20PAR/hendry_2025Ppar.zip"
 zip <- file.path(raw, "hendry_2025Ppar.zip")
+if (!file.exists(zip)) {
+  message("Downloading Hendry 2025 PAR parcels ...")
+  part <- paste0(zip, ".part")
+  ok <- tryCatch(download.file(zip_url, part, mode = "wb"), error = function(e) 1L)
+  if (!identical(as.integer(ok), 0L) || !file.exists(part)) {
+    if (file.exists(part)) file.remove(part)
+    stop("Download failed. Fetch it manually from the FL DOR Data Portal:\n  ",
+         zip_url, "\nand save it as ", zip)
+  }
+  file.rename(part, zip)
+}
 stopifnot("hendry_2025Ppar.zip not found in data/raw/dor_nal" = file.exists(zip))
 exdir <- file.path(raw, "hendry_2025Ppar")
 if (!dir.exists(exdir)) unzip(zip, exdir = exdir)

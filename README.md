@@ -68,7 +68,7 @@ e.g. `Rscript scripts/R/01_get_nass.R`.
 | 5 | `04_county_choropleth.R` | `county_choropleth`, `bearing_change` | needs step 2 + `tigris` |
 | 6 | `06_cdl_transition.R` | `cdl_hendry_citrus_transition`, `cdl_hendry_change`, `cdl_hendry_extent` | CropScape API (CDL) |
 | 7 | `07_solar_zonal.R` | `solar_county` | needs step 3 + `tigris` |
-| 8 | `08_dor_hendry_parcels.R` | `dor_hendry_citrus_parcels` | needs a **manually downloaded** Hendry PAR shapefile (see below) |
+| 8 | `08_dor_hendry_parcels.R` | `dor_hendry_citrus_parcels` | auto-downloads the Hendry 2025 PAR shapefile from the FL DOR portal (see below) |
 
 Then render: `quarto render dashboard/index.qmd`.
 
@@ -77,13 +77,21 @@ Then render: `quarto render dashboard/index.qmd`.
 and `01c_filter_fl.R` / `01d_nass_county_wide.R` / `01e_nass_state_wide.R` /
 `exlore_usda_nass.R` (exploratory NASS reshaping; their outputs are not read by the dashboard).
 
-### Manual step for `08_dor_hendry_parcels.R`
+### Note on `08_dor_hendry_parcels.R`
 
 Florida DOR parcel **use codes** (`DOR_UC`, where 66 = citrus) are only published for
-2024–2025. Download Hendry County's 2025 PAR parcel layer from the
-[FL DOR Data Portal](https://floridarevenue.com/property/Pages/DataPortal.aspx),
-save it as `data/raw/dor_nal/hendry_2025Ppar.zip`, then run the script. (A pre-computed
-`dor_hendry_citrus_parcels.rds` is already in `_outputs/`, so Option A works without this.)
+2024–2025. The script downloads Hendry County's 2025 PAR parcel layer automatically
+(cache-and-skip) from the FL DOR Data Portal:
+
+```
+https://floridarevenue.com/property/dataportal/Documents/PTO%20Data%20Portal/Map%20Data/2025F/2025F%20PAR/hendry_2025Ppar.zip
+```
+
+If that download ever fails, fetch the file manually from the
+[FL DOR Data Portal](https://floridarevenue.com/property/Pages/DataPortal.aspx)
+(Map Data → 2025F → 2025F PAR) and save it as `data/raw/dor_nal/hendry_2025Ppar.zip`,
+then re-run. (A pre-computed `dor_hendry_citrus_parcels.rds` is already in `_outputs/`,
+so Option A works without this step.)
 
 ---
 
