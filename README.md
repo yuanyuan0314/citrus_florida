@@ -12,6 +12,7 @@ solar PV database, and Florida DOR parcel records).
 ## What's in this repo
 
 ```
+run_all.R                      # ONE-CLICK build: runs the whole pipeline, then renders
 index.html                     # the rendered dashboard (this is what GitHub Pages serves)
 dashboard/
   index.qmd                    # dashboard source (Quarto); reads ONLY from scripts/R/_outputs/
@@ -40,6 +41,18 @@ dashboard immediately without an API key or any large downloads** (see Option A)
 - For the **full data pull** (Option B), a free USDA NASS QuickStats API key
   (https://quickstats.nass.usda.gov/api) placed in a `.Renviron` file at the repo root:
   `NASS_API_KEY=your_key_here`. *(Not needed for Option A.)*
+
+### Option 0 — one click (recommended)
+
+Open **`run_all.R`** in RStudio and click **Source** (or run `Rscript run_all.R` from the
+repo root). It runs every analysis script in the right order and then renders the
+dashboard to `dashboard/index.html`. Steps 1–2 need a NASS API key (see Prerequisites).
+
+Just want the webpage without an API key? The computed outputs are already shipped, so
+skip the data pulls — set `RUN_DATA_PIPELINE <- FALSE` near the top of `run_all.R`
+(or run `RUN_DATA_PIPELINE=FALSE Rscript run_all.R`) and it goes straight to rendering.
+
+The two options below are the same thing done by hand, if you prefer to run pieces yourself.
 
 ### Option A — just re-render (fast; no API key, no downloads)
 
